@@ -1,8 +1,10 @@
-import base64
-from io import BytesIO
+import io
+import random
+from typing import Optional
 
+import requests
 import streamlit as st
-from openai import OpenAI
+from PIL import Image
 
 st.set_page_config(
     page_title="AI Image Generator",
@@ -10,113 +12,172 @@ st.set_page_config(
     layout="wide",
 )
 
-MODEL = "gpt-image-1"
+API_BASE = "https://api.stability.ai/v2beta/stable-image/generate"
 
-STYLES = [
-    "Photorealistic",
+MODEL_OPTIONS = {
+    "Stable Image Core": "core",
+    "Stable Image Ultra": "ultra",
+}
+
+STYLE_PRESETS = [
+    "Photographic",
     "Cinematic",
     "Anime",
-    "3D Render",
+    "Digital Art",
     "Fantasy",
     "Cyberpunk",
-    "Watercolor",
-    "Oil Painting",
+    "3D Render",
     "Minimalist",
     "Concept Art",
+    "Watercolor",
 ]
 
-SIZES = [
-    "1024x1024",
-    "1024x1536",
-    "1536x1024",
+ASPECT_RATIOS = [
+    "1:1",
+    "16:9",
+    "9:16",
+    "4:5",
+    "3:2",
+    "21:9",
 ]
 
-QUALITIES = [
-    "low",
-    "medium",
-    "high",
+OUTPUT_FORMATS = [
+    "png",
+    "jpeg",
+    "webp",
 ]
 
+QUALITY_PRESETS = {
+    "Fast": "fast",
+    "Balanced": "balanced",
+    "Detailed": "detailed",
+}
 
-def get_client() -> OpenAI:
+
+def get_api_key() -> str:
     if "Image Generation" not in st.secrets:
         st.error("Missing Streamlit secret: 'Image Generation'")
         st.stop()
 
-    api_key = st.secrets["Image Generation"]
-
-    if not str(api_key).strip():
+    api_key = str(st.secrets["Image Generation"]).strip()
+    if not api_key:
         st.error("The secret 'Image Generation' is empty.")
         st.stop()
 
-    return OpenAI(api_key=api_key)
+    return api_key
 
 
-def build_prompt(subject: str, style: str, details: str, avoid_text: bool) -> str:
-    rules = []
-    if avoid_text:
-        rules.append("Do not include any text, letters, logos, captions, or watermarks in the image.")
-    rules.append("Make the image visually strong, polished, detailed, and high quality.")
+def enhance_prompt(subject: str, style: str, details: str, quality: str, avoid_text: bool) -> str:
+    text_rules = "No text, letters, logos, captions, or watermarks." if avoid_text else ""
+    quality_rules = {
+        "fast": "Keep it clean and simple with strong composition.",
+        "balanced": "Use rich detail, good lighting, and polished composition.",
+        "detailed": "Use highly detailed textures, premium lighting, strong realism, and refined composition.",
+    }
 
-    rules_text = " ".join(rules)
+    parts = [
+        subject.strip(),
+        f"Style: {style}",
+        details.strip(),
+        quality_rules.get(quality, ""),
+        text_rules,
+    ]
 
-    return f"""
-Create a professional image with the following concept.
-
-Subject:
-{subject}
-
-Style:
-{style}
-
-Extra details:
-{details}
-
-Instructions:
-{rules_text}
-""".strip()
+    return ", ".join([p for p in parts if p])
 
 
-def generate_image(prompt: str, size: str, quality: str) -> bytes:
-    client = get_client()
+def generate_image(
+    api_key: str,
+    model_slug: str,
+    prompt: str,
+    negative_prompt: str,
+    aspect_ratio: str,
+    output_format: str,
+    seed: Optional[int] = None,
+) -> bytes:
+    url = f"{API_BASE}/{model_slug}"
 
-    response = client.images.generate(
-        model=MODEL,
-        prompt=prompt,
-        size=size,
-        quality=quality,
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "image/*",
+    }
+
+    data = {
+        "prompt": prompt,
+        "aspect_ratio": aspect_ratio,
+        "output_format": output_format,
+    }
+
+    if negative_prompt.strip():
+        data["negative_prompt"] = negative_prompt.strip()
+
+    if seed is not None:
+        data["seed"] = str(seed)
+
+    # Stability examples commonly use multipart/form-data for v2beta image generation.
+    response = requests.post(
+        url,
+        headers=headers,
+        files={"none": ("", b"")},
+        data=data,
+        timeout=120,
     )
 
-    image_b64 = response.data[0].b64_json
-    return base64.b64decode(image_b64)
+    content_type = response.headers.get("content-type", "")
+
+    if response.status_code != 200:
+        try:
+            error_json = response.json()
+            message = error_json.get("errors") or error_json.get("message") or error_json
+        except Exception:
+            message = response.text or f"HTTP {response.status_code}"
+        raise RuntimeError(f"Stability API error: {message}")
+
+    if "image" not in content_type:
+        raise RuntimeError("The API did not return an image.")
+
+    return response.content
 
 
 st.title("🎨 AI Image Generator")
-st.caption("Built with Streamlit + OpenAI")
+st.caption("Professional Streamlit UI with Stability AI")
 
 with st.sidebar:
     st.header("Image Settings")
-    style = st.selectbox("Style", STYLES, index=0)
-    size = st.selectbox("Size", SIZES, index=0)
-    quality = st.selectbox("Quality", QUALITIES, index=1)
+
+    model_name = st.selectbox("Model", list(MODEL_OPTIONS.keys()), index=0)
+    style = st.selectbox("Style", STYLE_PRESETS, index=0)
+    aspect_ratio = st.selectbox("Aspect Ratio", ASPECT_RATIOS, index=0)
+    output_format = st.selectbox("Output Format", OUTPUT_FORMATS, index=0)
+    quality_label = st.selectbox("Quality Preset", list(QUALITY_PRESETS.keys()), index=1)
+
     avoid_text = st.toggle("Avoid text / logos / watermarks", value=True)
+    use_random_seed = st.toggle("Use random seed", value=True)
 
     st.markdown("---")
     st.markdown("### Streamlit Secret")
-    st.code('"Image Generation" = "your_openai_api_key_here"', language="toml")
+    st.code('"Image Generation" = "your_stability_api_key_here"', language="toml")
 
 left_col, right_col = st.columns([1, 1])
 
 with left_col:
     st.subheader("Prompt")
+
     subject = st.text_input(
         "What do you want to generate?",
-        placeholder="Example: A futuristic white sports car parked in neon-lit Tokyo at night",
+        placeholder="Example: A stylish young man wearing a modern black suit in a luxury studio",
     )
+
     details = st.text_area(
         "Extra details",
-        height=200,
-        placeholder="Example: cinematic lighting, rain reflections, ultra detailed, dramatic angle, realistic shadows",
+        height=180,
+        placeholder="Example: realistic skin texture, soft studio lighting, premium fashion photography, sharp focus, elegant pose",
+    )
+
+    negative_prompt = st.text_area(
+        "Negative prompt",
+        height=120,
+        placeholder="Example: blurry, deformed hands, extra fingers, low quality, watermark, text",
     )
 
     generate_btn = st.button("Generate Image", type="primary", use_container_width=True)
@@ -129,24 +190,49 @@ with right_col:
             st.warning("Please enter an image idea first.")
         else:
             try:
-                final_prompt = build_prompt(subject, style, details, avoid_text)
+                api_key = get_api_key()
+                model_slug = MODEL_OPTIONS[model_name]
+                quality = QUALITY_PRESETS[quality_label]
+
+                final_prompt = enhance_prompt(
+                    subject=subject,
+                    style=style,
+                    details=details,
+                    quality=quality,
+                    avoid_text=avoid_text,
+                )
+
+                seed = random.randint(1, 999999999) if use_random_seed else None
 
                 with st.spinner("Generating image..."):
-                    image_bytes = generate_image(final_prompt, size, quality)
+                    image_bytes = generate_image(
+                        api_key=api_key,
+                        model_slug=model_slug,
+                        prompt=final_prompt,
+                        negative_prompt=negative_prompt,
+                        aspect_ratio=aspect_ratio,
+                        output_format=output_format,
+                        seed=seed,
+                    )
 
-                st.image(image_bytes, caption=subject, use_container_width=True)
+                image = Image.open(io.BytesIO(image_bytes))
+                st.image(image, caption=model_name, use_container_width=True)
+
                 st.download_button(
                     label="Download Image",
                     data=image_bytes,
-                    file_name="generated_image.png",
-                    mime="image/png",
+                    file_name=f"generated_image.{output_format}",
+                    mime=f"image/{output_format}",
                     use_container_width=True,
                 )
 
                 with st.expander("Show final prompt"):
                     st.code(final_prompt, language="text")
 
+                if seed is not None:
+                    st.info(f"Seed used: {seed}")
+
             except Exception as e:
-                st.error(f"Image generation failed: {e}")
+                st.error(str(e))
     else:
         st.info("Your generated image will appear here.")
